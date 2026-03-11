@@ -10,7 +10,7 @@ import types
 import uuid
 from mimetypes import guess_extension, guess_type
 from pathlib import Path
-from urllib.parse import quote, unquote
+from urllib.parse import quote_plus, unquote
 from urllib.request import urlopen
 
 import frappe
@@ -69,7 +69,12 @@ class CloudStorageFile(File):
 			return
 
 		# Ensure correct formatting and type
-		self.file_url = unquote(self.file_url) if self.file_url else ""
+		if self.file_url and "/api/method/retrieve" in self.file_url:
+			# Cloud storage URL: rebuild with proper URL encoding using s3_key as source of truth
+			if self.s3_key:
+				self.file_url = FILE_URL.format(path=quote_plus(self.s3_key, safe="/()"))
+		else:
+			self.file_url = unquote(self.file_url) if self.file_url else ""
 
 		self.validate_attachment_references()
 
@@ -96,7 +101,10 @@ class CloudStorageFile(File):
 		"""
 		if self.attached_to_doctype and self.attached_to_name and not self.file_association:  # type: ignore
 			if not self.content_hash and "/api/method/retrieve" in self.file_url:  # type: ignore
-				associated_doc = frappe.get_value("File", {"file_url": self.file_url}, "name")  # type: ignore
+				if self.s3_key:
+					associated_doc = frappe.get_value("File", {"s3_key": self.s3_key, "name": ["!=", self.name]}, "name")  # type: ignore
+				else:
+					associated_doc = frappe.get_value("File", {"file_url": self.file_url}, "name")  # type: ignore
 			else:
 				associated_doc = frappe.get_value(
 					"File",
@@ -119,9 +127,9 @@ class CloudStorageFile(File):
 			if associated_doc and not self.s3_key:
 				s3_key = None
 				if "?key=" in self.file_url:
-					s3_key = self.file_url.split("?key=")[1]
+					s3_key = unquote(self.file_url.split("?key=")[1])
 				elif "key=" in self.file_url:
-					s3_key = self.file_url.split("key=")[1].split("&")[0]
+					s3_key = unquote(self.file_url.split("key=")[1].split("&")[0])
 				frappe.db.set_value("File", associated_doc, "s3_key", s3_key)
 				frappe.db.commit()
 		elif self.attached_to_doctype and self.attached_to_name and self.file_name:  # type: ignore
@@ -195,9 +203,12 @@ class CloudStorageFile(File):
 		if not self.file_url:  # type: ignore
 			client = get_cloud_storage_client()
 			path = get_file_path(self, client.folder)
-			self.file_url = FILE_URL.format(path=path)
+			self.file_url = FILE_URL.format(path=quote_plus(path, safe="/()"))
 		if not self.content_hash and "/api/method/retrieve" in self.file_url:  # type: ignore
-			associated_doc = frappe.get_value("File", {"file_url": self.file_url}, "name")  # type: ignore
+			if self.s3_key:
+				associated_doc = frappe.get_value("File", {"s3_key": self.s3_key, "name": ["!=", self.name]}, "name")  # type: ignore
+			else:
+				associated_doc = frappe.get_value("File", {"file_url": self.file_url}, "name")  # type: ignore
 		else:
 			associated_doc = frappe.get_value(
 				"File",
@@ -623,7 +634,7 @@ def get_sharing_url(client, key: str) -> str:
 def upload_file(file: File) -> File:
 	client = get_cloud_storage_client()
 	path = get_file_path(file, client.folder)
-	file.db_set("file_url", FILE_URL.format(path=path))
+	file.db_set("file_url", FILE_URL.format(path=quote_plus(path, safe="/()")))
 	content_type = file.content_type or from_buffer(file.content, mime=True)
 	try:
 		response = client.put_object(
@@ -749,7 +760,7 @@ def delete_file(file: File, **kwargs) -> File:
 		return file
 
 	if file.file_url and "?key=" in file.file_url:
-		key = file.file_url.split("?key=")[1]
+		key = unquote(file.file_url.split("?key=")[1])
 		if key:
 			client = get_cloud_storage_client()
 			try:
